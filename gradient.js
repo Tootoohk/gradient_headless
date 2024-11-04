@@ -7,29 +7,46 @@ const readline = require('readline');
 
 puppeteer.use(StealthPlugin());
 
+// 用于存储所有已启动的浏览器实例
+const browsers = [];
+const logs = [];  // 用于存储日志信息
+
+// 捕获 Ctrl+C 信号并关闭所有浏览器实例
+process.on('SIGINT', async () => {
+    console.log("\n正在关闭所有浏览器实例...");
+    for (const browser of browsers) {
+        await browser.close();
+    }
+    console.log("所有浏览器实例已关闭，退出脚本。");
+    process.exit();
+});
+
+// 日志记录函数，添加到内存日志中
+function log(userIndex, message) {
+    const timestamp = getCurrentTime();
+    const logMessage = `[${timestamp}] [User ${userIndex + 1}] ${message}`;
+    logs.push(logMessage);
+    console.log(logMessage);
+}
+
 // 格式化当前时间的函数
 function getCurrentTime() {
     const now = new Date();
     return now.toISOString().replace('T', ' ').split('.')[0]; // 形如 "YYYY-MM-DD HH:MM:SS"
 }
 
-// 日志打印函数，包含时间戳和用户编号
-function log(userIndex, message) {
-    console.log(`[${getCurrentTime()}] [User ${userIndex + 1}] ${message}`);
-}
-
 function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-// 从文件中读取代理信息并解析
+// 从文件中读取代理信息并解析，包括 IP、端口、用户名和密码
 function loadProxies(filePath) {
     const proxies = [];
     const data = fs.readFileSync(filePath, 'utf-8').split('\n');
     data.forEach(line => {
-        const [ip, port] = line.trim().split(':');
+        const [ip, port, username, password] = line.trim().split(':');
         if (ip && port) {
-            proxies.push({ ip, port });
+            proxies.push({ ip, port, username, password });
         }
     });
     return proxies;
@@ -52,158 +69,189 @@ async function launch(userIndex, userDataDir, proxy, userCredentials) {
     const extensionPath = path.resolve('extension');
     const pemPath = path.resolve('1.0.13_0.pem');
     const proxyUrl = `http://${proxy.ip}:${proxy.port}`;
-    // 动态调试端口，根据 userIndex 生成不同的端口号
     const debuggingPort = 11500 + userIndex;
 
-    log(userIndex, `Launching browser with user data directory: ${userDataDir}, proxy: ${proxyUrl}, and debugging port: ${debuggingPort}`);
-    const browser = await puppeteer.launch({
-        //executablePath: '/usr/bin/google-chrome-stable',
-        headless: false,
-        ignoreHTTPSErrors: true,
-        userDataDir: userDataDir,
-        args: [
-            `--no-sandbox`,
-            `--disable-extensions-except=${extensionPath}`,
-            `--load-extension=${extensionPath}`,
-            `--ignore-certificate-errors=${pemPath}`,
-            `--proxy-server=${proxyUrl}`,
-            `--remote-debugging-port=${debuggingPort}`,  // 根据 userIndex 设置的调试端口
-        ],
-    });
-    log(userIndex, `Browser launched successfully with user data directory: ${userDataDir}`);
+    log(userIndex, `启动浏览器，用户数据目录: ${userDataDir}, 代理: ${proxyUrl}, 调试端口: ${debuggingPort}`);
+    
+    let browser;
+    let retryCount = 0;
+    const maxRetries = 3;  // 设置最大重试次数
+
+    while (retryCount < maxRetries) {
+        try {
+            browser = await puppeteer.launch({
+                headless: "new",  // 启用无头模式
+                ignoreHTTPSErrors: true,
+                userDataDir: userDataDir,
+                args: [
+                    `--no-sandbox`,
+                    `--disable-extensions-except=${extensionPath}`,
+                    `--load-extension=${extensionPath}`,
+                    `--ignore-certificate-errors=${pemPath}`,
+                    `--proxy-server=${proxyUrl}`,
+                    `--remote-debugging-port=${debuggingPort}`,
+                ],
+            });
+            browsers.push({ userIndex, browser });  // 将浏览器实例添加到全局数组中
+            log(userIndex, `浏览器启动成功，用户数据目录: ${userDataDir}`);
+            break;  // 如果启动成功，跳出循环
+        } catch (e) {
+            retryCount++;
+            log(userIndex, `代理连接失败，重试 ${retryCount} / ${maxRetries}: ${e.message}`);
+            if (retryCount >= maxRetries) {
+                log(userIndex, `代理 ${proxy.ip}:${proxy.port} 无法连接，跳过此代理。`);
+                return false;  // 返回 false 表示代理不可用
+            }
+            await sleep(2000);  // 等待 2 秒再重试
+        }
+    }
 
     try {
-        await sleep(5000)
+        await sleep(5000);
 
-        const pages = await browser.pages();
-        // 遍历所有页面并关闭包含 "gradient" 的页面
-        for (const page of pages) {
-            const url = await page.url(); // 获取页面的 URL
-            if (url.includes("gradient")) {
-                await page.close();
-                log(userIndex, `Closed page with URL containing "gradient": ${url}`);
-            }
-        }
-
-        log(userIndex, `Creating new page for user data directory: ${userDataDir}`);
         const page = await browser.newPage();
-        log(userIndex, `Page created successfully for user data directory: ${userDataDir}`);
+        log(userIndex, `新页面创建成功，用户数据目录: ${userDataDir}`);
+
+        if (proxy.username && proxy.password) {
+            await page.authenticate({
+                username: proxy.username,
+                password: proxy.password,
+            });
+            log(userIndex, `设置代理身份验证，用户名: ${proxy.username}`);
+        }
 
         const randomUserAgent = randomUseragent.getRandom();
         await page.setUserAgent(randomUserAgent);
-        log(userIndex, `Using user agent: ${randomUserAgent}`);
+        log(userIndex, `使用用户代理: ${randomUserAgent}`);
 
         const url = 'https://app.gradient.network/';
-        log(userIndex, `Navigating to ${url}...`);
         await page.goto(url, { waitUntil: 'domcontentloaded' });
-        log(userIndex, `Page loaded successfully for user data directory: ${userDataDir}`);
-
-        // 查找并输入邮箱
-        const emailSelector = 'input[placeholder="Enter Email"]';
-        const passwordSelector = 'input[placeholder="Enter Password"]';
-        
-        // 输入邮箱
-        const emailInput = await page.waitForSelector(emailSelector, { timeout: 5000 });
-        if (emailInput) {
-            await emailInput.type(userCredentials.username);
-            log(userIndex, `Entered ${userCredentials.username} into email input.`);
-        } else {
-            log(userIndex, "Email input not found.");
-        }
-
-        // 输入密码
-        const passwordInput = await page.waitForSelector(passwordSelector, { timeout: 5000 });
-        if (passwordInput) {
-            await passwordInput.type(userCredentials.password);
-            log(userIndex, `Entered ${userCredentials.password} into password input.`);
-
-            // 按下回车键
-            await passwordInput.press('Enter');
-            log(userIndex, "Submitted login form.");
-        } else {
-            log(userIndex, "Password input not found.");
-        }
-
+        log(userIndex, `页面加载成功，用户数据目录: ${userDataDir}`);
+        return true;  // 返回 true 表示代理成功使用
     } catch (e) {
-        log(userIndex, `Error: ${e.message}`);
+        log(userIndex, `运行中遇到错误: ${e.message}`);
+        return false;  // 返回 false 表示代理不可用
     }
 }
 
-async function run(userNumbers, proxies, credentials) {
+async function run(userIndex, proxyCount, proxies, credentials) {
     const baseUserDataDir = path.resolve('USERDATA');
+    const userCredentials = credentials[userIndex];
+    log(userIndex, `凭据: ${userCredentials.username}:${userCredentials.password}`);
 
-    // 检查代理和凭据数量是否足够
-    if (userNumbers.length > proxies.length || userNumbers.length > credentials.length) {
-        console.log("代理或凭据数量不足，请添加更多代理或用户信息！");
-        return;
-    }
+    let usedProxyCount = 0;
+    let proxyIndex = userIndex * proxyCount;
 
-    for (const userNumber of userNumbers) {
-        const userIndex = userNumber - 1;
-        if (userIndex >= proxies.length || userIndex >= credentials.length) {
-            log(userIndex, `用户 ${userNumber} 超出可用代理或凭据的范围，请添加更多。`);
-            return;
+    while (usedProxyCount < proxyCount && proxyIndex < proxies.length) {
+        const proxy = proxies[proxyIndex];
+        const userDataDir = path.join(baseUserDataDir, `user_${userIndex}`, `proxy_${proxyIndex + 1}`);
+        fs.mkdirSync(userDataDir, { recursive: true });
+
+        log(userIndex, `尝试使用代理: ${proxy.ip}:${proxy.port}`);
+
+        const isSuccessful = await launch(userIndex, userDataDir, proxy, userCredentials);
+        if (isSuccessful) {
+            usedProxyCount++;
+        } else {
+            log(userIndex, `代理 ${proxy.ip}:${proxy.port} 不可用，跳过`);
         }
 
-        const userDataDir = path.join(baseUserDataDir, userNumber.toString().padStart(4, '0'));
-        fs.mkdirSync(userDataDir, { recursive: true });
-        
-        // 使用对应的代理
-        const proxy = proxies[userIndex];
-        log(userIndex, `Using proxy: ${proxy.ip}:${proxy.port}`);
-        
-        // 读取对应的用户名和密码
-        const userCredentials = credentials[userIndex];
-        log(userIndex, `Credentials: ${userCredentials.username}:${userCredentials.password}`);
-        
-        // 启动浏览器
-        await launch(userIndex, userDataDir, proxy, userCredentials);
+        proxyIndex++;
+    }
+
+    if (usedProxyCount < proxyCount) {
+        log(userIndex, `警告: 仅找到 ${usedProxyCount} 个有效代理，未达到指定数量 ${proxyCount}`);
+    }
+
+    if (userIndex === credentials.length - 1) {
+        console.log("所有实例启动完毕。");
     }
 }
 
 // 读取用户输入
-const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout
-});
-
-rl.question('请输入要运行的用户编号（例如：2 或者范围 1-5）：', (input) => {
-    const userNumbers = [];
-    const parts = input.split(' ');
-
-    parts.forEach(part => {
-        if (part.includes('-')) {
-            const range = part.split('-').map(Number);
-            if (range.length === 2 && range[0] <= range[1]) {
-                for (let i = range[0]; i <= range[1]; i++) {
-                    userNumbers.push(i);
-                }
-            }
-        } else {
-            userNumbers.push(Number(part));
-        }
+function mainMenu() {
+    const rl = readline.createInterface({
+        input: process.stdin,
+        output: process.stdout
     });
 
-    // 去重并排序
-    const uniqueUserNumbers = [...new Set(userNumbers)].sort((a, b) => a - b);
+    console.log("\n菜单选项：");
+    console.log("1. 启动用户实例");
+    console.log("2. 查看日志");
+    console.log("3. 检查所有浏览器状态");
+    console.log("4. 结束特定用户的实例");
+    console.log("0. 退出");
 
-    if (uniqueUserNumbers.length === 0) {
-        console.log("没有有效的用户编号，请重新运行脚本并输入有效的编号。");
-    } else {
-        // 读取代理文件并解析
-        const proxies = loadProxies('proxies.txt');
-        if (proxies.length === 0) {
-            console.log("没有可用的代理，请检查 proxies.txt 文件是否有内容。");
-        } else {
-            // 读取用户名和密码
-            const credentials = loadCredentials('credentials.txt');
-            if (credentials.length === 0) {
-                console.log("没有可用的凭据，请检查 credentials.txt 文件是否有内容。");
-            } else {
-                run(uniqueUserNumbers, proxies, credentials);
-            }
+    rl.question("请选择一个选项: ", (option) => {
+        switch (option) {
+            case '1':
+                rl.question('请输入要运行的用户编号（例如：1 或 2）：', (userInput) => {
+                    rl.question('请输入要使用的代理数量：', (proxyCountInput) => {
+                        const userIndex = parseInt(userInput) - 1;
+                        const proxyCount = parseInt(proxyCountInput);
+
+                        if (isNaN(userIndex) || isNaN(proxyCount)) {
+                            console.log("请输入有效的用户编号和代理数量");
+                        } else {
+                            const proxies = loadProxies('proxies.txt');
+                            const credentials = loadCredentials('credentials.txt');
+                            if (proxies.length === 0 || credentials.length === 0 || userIndex >= credentials.length) {
+                                console.log("代理或凭据不足，请检查文件内容。");
+                            } else {
+                                run(userIndex, proxyCount, proxies, credentials);
+                            }
+                        }
+                        rl.close();
+                        mainMenu();
+                    });
+                });
+                break;
+            case '2':
+                console.log("\n---- 日志 ----");
+                logs.forEach(log => console.log(log));
+                rl.close();
+                mainMenu();
+                break;
+            case '3':
+                console.log("\n检查所有浏览器状态：");
+                browsers.forEach(({ userIndex, browser }) => {
+                    const status = browser.isConnected() ? "运行中" : "已断开";
+                    console.log(`[User ${userIndex + 1}]
+                console.log(`[User ${userIndex + 1}] 浏览器状态: ${status}`);
+                });
+                rl.close();
+                mainMenu();
+                break;
+            case '4':
+                rl.question('请输入要结束的用户编号（例如：1 或 2）：', (userInput) => {
+                    const userIndex = parseInt(userInput) - 1;
+
+                    const browserInstance = browsers.find(b => b.userIndex === userIndex);
+                    if (browserInstance && browserInstance.browser.isConnected()) {
+                        browserInstance.browser.close().then(() => {
+                            console.log(`[User ${userIndex + 1}] 浏览器实例已关闭。`);
+                        });
+                    } else {
+                        console.log(`[User ${userIndex + 1}] 没有正在运行的浏览器实例或已关闭。`);
+                    }
+
+                    rl.close();
+                    mainMenu();
+                });
+                break;
+            case '0':
+                console.log("退出程序...");
+                rl.close();
+                process.exit();
+                break;
+            default:
+                console.log("无效选项，请重新选择。");
+                rl.close();
+                mainMenu();
+                break;
         }
-    }
+    });
+}
 
-    rl.close();
-});
+// 启动主菜单
+mainMenu();
