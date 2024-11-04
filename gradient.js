@@ -123,30 +123,64 @@ async function launch(userIndex, userDataDir, proxy, userCredentials, debuggingP
         await page.setUserAgent(randomUserAgent);
         log(userIndex, `使用用户代理: ${randomUserAgent}`);
 
+        // 访问目标网页
         const url = 'https://app.gradient.network/';
+        log(userIndex, `正在导航到 ${url}...`);
         await page.goto(url, { waitUntil: 'domcontentloaded' });
         log(userIndex, `页面加载成功，用户数据目录: ${userDataDir}`);
-        return true;  // 返回 true 表示代理成功使用
+
+        // 输入邮箱和密码并提交表单
+        const emailSelector = 'input[placeholder="Enter Email"]';
+        const passwordSelector = 'input[placeholder="Enter Password"]';
+
+        const emailInput = await page.waitForSelector(emailSelector, { timeout: 5000 });
+        if (emailInput) {
+            await emailInput.type(userCredentials.username);
+            log(userIndex, `在邮箱输入框中输入: ${userCredentials.username}`);
+        } else {
+            log(userIndex, "找不到邮箱输入框。");
+        }
+
+        const passwordInput = await page.waitForSelector(passwordSelector, { timeout: 5000 });
+        if (passwordInput) {
+            await passwordInput.type(userCredentials.password);
+            log(userIndex, `在密码输入框中输入: ${userCredentials.password}`);
+            await passwordInput.press('Enter');
+            log(userIndex, "提交登录表单。");
+        } else {
+            log(userIndex, "找不到密码输入框。");
+        }
+
+        return true;  // 返回 true 表示代理成功使用并完成登录
     } catch (e) {
         log(userIndex, `运行中遇到错误: ${e.message}`);
         return false;  // 返回 false 表示代理不可用
     }
 }
 
-async function run(userIndex, proxyCount, proxies, credentials) {
+async function run(userIndex, proxyRange, proxies, credentials) {
     const baseUserDataDir = path.resolve('USERDATA');
     const userCredentials = credentials[userIndex];
     log(userIndex, `凭据: ${userCredentials.username}:${userCredentials.password}`);
 
-    let usedProxyCount = 0;
-    let proxyIndex = userIndex * proxyCount;
+    // 解析代理范围
+    const [start, end] = proxyRange.split('-').map(Number);
+    if (isNaN(start) || isNaN(end) || start < 1 || end > proxies.length || start > end) {
+        console.log(`无效的代理范围：${proxyRange}。请确保输入的范围在有效范围内，并且格式正确，例如 "5-10"。`);
+        mainMenu();
+        return;
+    }
 
-    while (usedProxyCount < proxyCount && proxyIndex < proxies.length) {
-        const proxy = proxies[proxyIndex];
-        const userDataDir = path.join(baseUserDataDir, `user_${userIndex}`, `proxy_${proxyIndex + 1}`);
+    const selectedProxies = proxies.slice(start - 1, end); // 选择范围内的代理
+    log(userIndex, `选择的代理范围：第 ${start} 到第 ${end} 个代理`);
+
+    let usedProxyCount = 0;
+
+    for (const [index, proxy] of selectedProxies.entries()) {
+        const userDataDir = path.join(baseUserDataDir, `user_${userIndex}`, `proxy_${start + index}`);
         fs.mkdirSync(userDataDir, { recursive: true });
 
-        const debuggingPort = 11500 + proxyIndex;  // 为每个代理实例分配唯一的调试端口
+        const debuggingPort = 11500 + start + index;  // 为每个代理实例分配唯一的调试端口
         log(userIndex, `尝试使用代理: ${proxy.ip}:${proxy.port}`);
 
         const isSuccessful = await launch(userIndex, userDataDir, proxy, userCredentials, debuggingPort);
@@ -155,12 +189,10 @@ async function run(userIndex, proxyCount, proxies, credentials) {
         } else {
             log(userIndex, `代理 ${proxy.ip}:${proxy.port} 不可用，跳过`);
         }
-
-        proxyIndex++;
     }
 
-    if (usedProxyCount < proxyCount) {
-        log(userIndex, `警告: 仅找到 ${usedProxyCount} 个有效代理，未达到指定数量 ${proxyCount}`);
+    if (usedProxyCount < selectedProxies.length) {
+        log(userIndex, `警告: 仅找到 ${usedProxyCount} 个有效代理，未达到指定数量 ${selectedProxies.length}`);
     }
 
     console.log("所有实例启动完毕。");
@@ -185,12 +217,11 @@ function mainMenu() {
         switch (option) {
             case '1':
                 rl.question('请输入要运行的用户编号（例如：1 或 2）：', (userInput) => {
-                    rl.question('请输入要使用的代理数量：', (proxyCountInput) => {
+                    rl.question('请输入要使用的代理范围（例如：5-10）：', (proxyRange) => {
                         const userIndex = parseInt(userInput) - 1;
-                        const proxyCount = parseInt(proxyCountInput);
 
-                        if (isNaN(userIndex) || isNaN(proxyCount)) {
-                            console.log("请输入有效的用户编号和代理数量");
+                        if (isNaN(userIndex) || !/^\d+-\d+$/.test(proxyRange)) {
+                            console.log("请输入有效的用户编号和代理范围，范围格式如 \"5-10\"");
                             rl.close();
                             mainMenu();
                         } else {
@@ -201,7 +232,7 @@ function mainMenu() {
                                 rl.close();
                                 mainMenu();
                             } else {
-                                run(userIndex, proxyCount, proxies, credentials);
+                                run(userIndex, proxyRange, proxies, credentials);
                             }
                         }
                     });
