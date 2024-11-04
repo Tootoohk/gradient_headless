@@ -15,7 +15,7 @@ const logs = [];  // 用于存储日志信息
 process.on('SIGINT', async () => {
     console.log("\n正在关闭所有浏览器实例...");
     for (const browser of browsers) {
-        await browser.close();
+        await browser.browser.close();
     }
     console.log("所有浏览器实例已关闭，退出脚本。");
     process.exit();
@@ -65,11 +65,10 @@ function loadCredentials(filePath) {
     return credentials;
 }
 
-async function launch(userIndex, userDataDir, proxy, userCredentials) {
+async function launch(userIndex, userDataDir, proxy, userCredentials, debuggingPort) {
     const extensionPath = path.resolve('extension');
     const pemPath = path.resolve('1.0.13_0.pem');
     const proxyUrl = `http://${proxy.ip}:${proxy.port}`;
-    const debuggingPort = 11500 + userIndex;
 
     log(userIndex, `启动浏览器，用户数据目录: ${userDataDir}, 代理: ${proxyUrl}, 调试端口: ${debuggingPort}`);
     
@@ -89,7 +88,7 @@ async function launch(userIndex, userDataDir, proxy, userCredentials) {
                     `--load-extension=${extensionPath}`,
                     `--ignore-certificate-errors=${pemPath}`,
                     `--proxy-server=${proxyUrl}`,
-                    `--remote-debugging-port=${debuggingPort}`,
+                    `--remote-debugging-port=${debuggingPort}`, // 为每个实例分配唯一的调试端口
                 ],
             });
             browsers.push({ userIndex, browser });  // 将浏览器实例添加到全局数组中
@@ -147,9 +146,10 @@ async function run(userIndex, proxyCount, proxies, credentials) {
         const userDataDir = path.join(baseUserDataDir, `user_${userIndex}`, `proxy_${proxyIndex + 1}`);
         fs.mkdirSync(userDataDir, { recursive: true });
 
+        const debuggingPort = 11500 + proxyIndex;  // 为每个代理实例分配唯一的调试端口
         log(userIndex, `尝试使用代理: ${proxy.ip}:${proxy.port}`);
 
-        const isSuccessful = await launch(userIndex, userDataDir, proxy, userCredentials);
+        const isSuccessful = await launch(userIndex, userDataDir, proxy, userCredentials, debuggingPort);
         if (isSuccessful) {
             usedProxyCount++;
         } else {
@@ -163,9 +163,8 @@ async function run(userIndex, proxyCount, proxies, credentials) {
         log(userIndex, `警告: 仅找到 ${usedProxyCount} 个有效代理，未达到指定数量 ${proxyCount}`);
     }
 
-    if (userIndex === credentials.length - 1) {
-        console.log("所有实例启动完毕。");
-    }
+    console.log("所有实例启动完毕。");
+    mainMenu();  // 在所有实例启动完成后返回菜单
 }
 
 // 读取用户输入
@@ -192,17 +191,19 @@ function mainMenu() {
 
                         if (isNaN(userIndex) || isNaN(proxyCount)) {
                             console.log("请输入有效的用户编号和代理数量");
+                            rl.close();
+                            mainMenu();
                         } else {
                             const proxies = loadProxies('proxies.txt');
                             const credentials = loadCredentials('credentials.txt');
                             if (proxies.length === 0 || credentials.length === 0 || userIndex >= credentials.length) {
                                 console.log("代理或凭据不足，请检查文件内容。");
+                                rl.close();
+                                mainMenu();
                             } else {
                                 run(userIndex, proxyCount, proxies, credentials);
                             }
                         }
-                        rl.close();
-                        mainMenu();
                     });
                 });
                 break;
@@ -216,8 +217,7 @@ function mainMenu() {
                 console.log("\n检查所有浏览器状态：");
                 browsers.forEach(({ userIndex, browser }) => {
                     const status = browser.isConnected() ? "运行中" : "已断开";
-                    console.log(`[User ${userIndex + 1}]
-                console.log(`[User ${userIndex + 1}] 浏览器状态: ${status}`);
+                    console.log(`[User ${userIndex + 1}] 浏览器状态: ${status}`);
                 });
                 rl.close();
                 mainMenu();
