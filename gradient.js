@@ -24,7 +24,7 @@ process.on('SIGINT', async () => {
 // 日志记录函数，添加到内存日志中
 function log(userIndex, message) {
     const timestamp = getCurrentTime();
-    const logMessage = `[${timestamp}] [User ${userIndex + 1}] ${message}`;
+    const logMessage = `[${timestamp}] [用户 ${userIndex + 1}] ${message}`;
     logs.push(logMessage);
     console.log(logMessage);
 }
@@ -83,12 +83,15 @@ async function launch(userIndex, userDataDir, proxy, userCredentials, debuggingP
                 ignoreHTTPSErrors: true,
                 userDataDir: userDataDir,
                 args: [
-                    `--no-sandbox`,
+                    '--no-sandbox',
                     `--disable-extensions-except=${extensionPath}`,
                     `--load-extension=${extensionPath}`,
                     `--ignore-certificate-errors=${pemPath}`,
                     `--proxy-server=${proxyUrl}`,
                     `--remote-debugging-port=${debuggingPort}`, // 为每个实例分配唯一的调试端口
+                    '--no-first-run',
+                    '--no-zygote',
+                    '--js-flags=--max-old-space-size=512',
                 ],
             });
             browsers.push({ userIndex, browser });  // 将浏览器实例添加到全局数组中
@@ -106,10 +109,8 @@ async function launch(userIndex, userDataDir, proxy, userCredentials, debuggingP
     }
 
     try {
-        await sleep(5000);
-
         const page = await browser.newPage();
-        log(userIndex, `新页面创建成功，用户数据目录: ${userDataDir}`);
+        log(userIndex, `为用户数据目录创建新页面: ${userDataDir}`);
 
         if (proxy.username && proxy.password) {
             await page.authenticate({
@@ -133,7 +134,7 @@ async function launch(userIndex, userDataDir, proxy, userCredentials, debuggingP
         const emailSelector = 'input[placeholder="Enter Email"]';
         const passwordSelector = 'input[placeholder="Enter Password"]';
 
-        const emailInput = await page.waitForSelector(emailSelector, { timeout: 5000 });
+        const emailInput = await page.waitForSelector(emailSelector, { timeout: 10000 });
         if (emailInput) {
             await emailInput.type(userCredentials.username);
             log(userIndex, `在邮箱输入框中输入: ${userCredentials.username}`);
@@ -141,7 +142,7 @@ async function launch(userIndex, userDataDir, proxy, userCredentials, debuggingP
             log(userIndex, "找不到邮箱输入框。");
         }
 
-        const passwordInput = await page.waitForSelector(passwordSelector, { timeout: 5000 });
+        const passwordInput = await page.waitForSelector(passwordSelector, { timeout: 3000 });
         if (passwordInput) {
             await passwordInput.type(userCredentials.password);
             log(userIndex, `在密码输入框中输入: ${userCredentials.password}`);
@@ -151,11 +152,28 @@ async function launch(userIndex, userDataDir, proxy, userCredentials, debuggingP
             log(userIndex, "找不到密码输入框。");
         }
 
-        return true;  // 返回 true 表示代理成功使用并完成登录
+        // 登录完成后等待 5 秒
+        await sleep(5000);
+
+        // 打开一个空白页，避免关闭页面导致浏览器退出
+        await browser.newPage();
+
+        // 再次遍历所有页面并关闭包含 "gradient" 的页面，以节省系统资源
+        const pages = await browser.pages();
+        for (const page of pages) {
+            const url = await page.url();
+            if (url.includes("gradient")) {
+                await page.close();
+                log(userIndex, `关闭包含 "gradient" 的页面，URL: ${url}`);
+            }
+        }
+
     } catch (e) {
         log(userIndex, `运行中遇到错误: ${e.message}`);
         return false;  // 返回 false 表示代理不可用
     }
+
+    return true;  // 返回 true 表示代理成功使用并完成登录
 }
 
 async function run(userIndex, proxyRange, proxies, credentials) {
@@ -201,11 +219,6 @@ async function run(userIndex, proxyRange, proxies, credentials) {
 
 // 读取用户输入
 function mainMenu() {
-    const rl = readline.createInterface({
-        input: process.stdin,
-        output: process.stdout
-    });
-
     console.log("\n菜单选项：");
     console.log("1. 启动用户实例");
     console.log("2. 查看日志");
@@ -213,23 +226,37 @@ function mainMenu() {
     console.log("4. 结束特定用户的实例");
     console.log("0. 退出");
 
+    const rl = readline.createInterface({
+        input: process.stdin,
+        output: process.stdout
+    });
+
     rl.question("请选择一个选项: ", (option) => {
+        rl.close();  // 确保在每次 question 调用后关闭实例
         switch (option) {
             case '1':
-                rl.question('请输入要运行的用户编号（例如：1 或 2）：', (userInput) => {
-                    rl.question('请输入要使用的代理范围（例如：5-10）：', (proxyRange) => {
+                const rl1 = readline.createInterface({
+                    input: process.stdin,
+                    output: process.stdout
+                });
+                rl1.question('请输入要运行的用户编号（例如：1 或 2）：', (userInput) => {
+                    rl1.close();
+                    const rl2 = readline.createInterface({
+                        input: process.stdin,
+                        output: process.stdout
+                    });
+                    rl2.question('请输入要使用的代理范围（例如：5-10）：', (proxyRange) => {
+                        rl2.close();
                         const userIndex = parseInt(userInput) - 1;
 
                         if (isNaN(userIndex) || !/^\d+-\d+$/.test(proxyRange)) {
                             console.log("请输入有效的用户编号和代理范围，范围格式如 \"5-10\"");
-                            rl.close();
                             mainMenu();
                         } else {
                             const proxies = loadProxies('proxies.txt');
                             const credentials = loadCredentials('credentials.txt');
                             if (proxies.length === 0 || credentials.length === 0 || userIndex >= credentials.length) {
                                 console.log("代理或凭据不足，请检查文件内容。");
-                                rl.close();
                                 mainMenu();
                             } else {
                                 run(userIndex, proxyRange, proxies, credentials);
@@ -241,43 +268,43 @@ function mainMenu() {
             case '2':
                 console.log("\n---- 日志 ----");
                 logs.forEach(log => console.log(log));
-                rl.close();
                 mainMenu();
                 break;
             case '3':
                 console.log("\n检查所有浏览器状态：");
                 browsers.forEach(({ userIndex, browser }) => {
                     const status = browser.isConnected() ? "运行中" : "已断开";
-                    console.log(`[User ${userIndex + 1}] 浏览器状态: ${status}`);
+                    console.log(`[用户 ${userIndex + 1}] 浏览器状态: ${status}`);
                 });
-                rl.close();
                 mainMenu();
                 break;
             case '4':
-                rl.question('请输入要结束的用户编号（例如：1 或 2）：', (userInput) => {
+                const rl3 = readline.createInterface({
+                    input: process.stdin,
+                    output: process.stdout
+                });
+                rl3.question('请输入要结束的用户编号（例如：1 或 2）：', (userInput) => {
+                    rl3.close();
                     const userIndex = parseInt(userInput) - 1;
 
                     const browserInstance = browsers.find(b => b.userIndex === userIndex);
                     if (browserInstance && browserInstance.browser.isConnected()) {
                         browserInstance.browser.close().then(() => {
-                            console.log(`[User ${userIndex + 1}] 浏览器实例已关闭。`);
+                            console.log(`[用户 ${userIndex + 1}] 浏览器实例已关闭。`);
                         });
                     } else {
-                        console.log(`[User ${userIndex + 1}] 没有正在运行的浏览器实例或已关闭。`);
+                        console.log(`[用户 ${userIndex + 1}] 没有正在运行的浏览器实例或已关闭。`);
                     }
 
-                    rl.close();
                     mainMenu();
                 });
                 break;
             case '0':
                 console.log("退出程序...");
-                rl.close();
                 process.exit();
                 break;
             default:
                 console.log("无效选项，请重新选择。");
-                rl.close();
                 mainMenu();
                 break;
         }
