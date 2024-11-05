@@ -20,7 +20,7 @@
 1. **克隆项目**
 
    ```bash
-   git clone https://github.com/fabius8/gradient_headless
+   git clone https://github.com/Tootoohk/gradient_headless.git
    cd gradient_headless
    ```
 
